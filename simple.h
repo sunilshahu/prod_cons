@@ -6,6 +6,8 @@
 #define SCULL_QSET    1024 /* one quantum set is 1024kb = 1 mb of size*/
 #endif
 
+#define MAX_SIMPLE_DEV 2
+
 /*size of max allowed data  = 32 MB */
 #ifndef SCULL_MAX_DATA
 #define SCULL_MAX_DATA    (SCULL_QUANTUM * SCULL_QSET * 32)
@@ -13,11 +15,11 @@
 
 #define DEVCREATEERR	1001
 #define DEVADDERR	1002
+
 struct scull_qset {
 	void **data;
 	struct scull_qset *next;
 };
-
 
 struct scull_dev {
 	struct scull_qset *data;  /* Pointer to first quantum set */

@@ -1,14 +1,13 @@
 /*
- * my_device_0, it takes data and stores
+ * my_device_0,/dev/prod, it takes data and stores
  * in a linked list
- * my_device_1, it takes data from linked
+ * my_device_1 /dev/cons, it takes data from linked
  * list and returns to user
  */
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
-
 #include <linux/kernel.h>   /* printk() */
 #include <linux/slab.h>   /* kmalloc() */
 #include <linux/fs.h>       /* everything... */
@@ -22,15 +21,17 @@
 #include <linux/device.h>
 #include <linux/string.h>
 #include "simple.h"
+
 static struct class *cl;
 static int simple_major;
 static int simple_minor;
 int my_device_no;
-char my_device_string[20];
-static dev_t dev;
-
 struct scull_dev *scull_private_data;
+static struct cdev simple_cdev[MAX_SIMPLE_DEV];
 
+/*
+ * scull_tream() frees memory allocated to dev->data
+ */
 int scull_trim(struct scull_dev *dev)
 {
 	struct scull_qset *next, *dptr;
@@ -58,6 +59,11 @@ int scull_trim(struct scull_dev *dev)
 	return 0;
 }
 
+/*
+ * scull_follow() returns pointer of the scull_qset where data needs to be
+ * written or to be read. during write if new quantum set is required, it
+ * creates one and adds at the end of scull_qset linked list.
+ */
 struct scull_qset *scull_follow(struct scull_dev *dev, int n)
 {
 	struct scull_qset *qs = dev->data;
@@ -85,8 +91,11 @@ struct scull_qset *scull_follow(struct scull_dev *dev, int n)
 	return qs;
 }
 
-
-ssize_t scull_write(struct file *filp, const char __user *buf, size_t count,
+/*
+ * Producer of data - prod_write() concates data into buffer written
+ * into /dev/prod device. Buffer is limited to grow upto 32MB.
+ */
+ssize_t prod_write(struct file *filp, const char __user *buf, size_t count,
 		loff_t *f_pos)
 {
 	struct scull_qset *dptr;
@@ -141,7 +150,12 @@ out:
 			__func__, (int)retval, scull_private_data->size);
 	return retval;
 }
-ssize_t scull_read(struct file *filp, char __user *buf, size_t count,
+
+/*
+ * Consumer of data - cons_read() reads data from kernel buffer and copies to
+ * userspace buffer. It clears the kernel buffer after copying complete buffer.
+ */
+ssize_t cons_read(struct file *filp, char __user *buf, size_t count,
 		loff_t *f_pos)
 {
 	struct scull_qset *dptr;	/* the first listitem */
@@ -184,20 +198,19 @@ out:
 	return retval;
 }
 
-static int simple_open_0(struct inode *inode, struct file *filp)
+static int prod_open(struct inode *inode, struct file *filp)
 {
-	printk(KERN_INFO "%s() : SIMPLE OPEN\n", __func__);
+	printk(KERN_INFO "%s()\n", __func__);
 	return 0;
 }
 
-
-static int simple_release_0(struct inode *inode, struct file *filp)
+static int prod_release(struct inode *inode, struct file *filp)
 {
-	printk(KERN_INFO "%s() : SIMPLE close\n", __func__);
+	printk(KERN_INFO "%s()\n", __func__);
 	return 0;
 }
 
-static ssize_t my_read_0(struct file *f, char __user *buf, size_t len,
+static ssize_t prod_read(struct file *f, char __user *buf, size_t len,
 			loff_t *off)
 {
 	printk(KERN_INFO "%s() Read at exit end of pipe at /dev/my_device_1\n",
@@ -205,20 +218,20 @@ static ssize_t my_read_0(struct file *f, char __user *buf, size_t len,
 	return 0;
 }
 
-static int simple_open_1(struct inode *inode, struct file *filp)
+static int cons_open(struct inode *inode, struct file *filp)
 {
-	printk(KERN_INFO "%s() : SIMPLE OPEN\n", __func__);
+	printk(KERN_INFO "%s()\n", __func__);
 	return 0;
 }
 
 
-static int simple_release_1(struct inode *inode, struct file *filp)
+static int cons_release(struct inode *inode, struct file *filp)
 {
-	printk(KERN_INFO "%s() : SIMPLE close\n", __func__);
+	printk(KERN_INFO "%s()\n", __func__);
 	return 0;
 }
 
-static ssize_t my_write_1(struct file *f, const char __user *buf, size_t len,
+static ssize_t cons_write(struct file *f, const char __user *buf, size_t len,
 				loff_t *off)
 {
 	char *t = "/dev/my_device_0";
@@ -229,28 +242,26 @@ static ssize_t my_write_1(struct file *f, const char __user *buf, size_t len,
 /*
  * Set up the cdev structure for a device.
  */
-static int simple_setup_cdev(struct cdev *dev, int minor,
-		const struct file_operations *fops)
+static int simple_setup_cdev(struct cdev *cdev, int minor,
+		const struct file_operations *fops, const char *device_name)
 {
 	int err;
 	int ret = 0;
 	int devno = MKDEV(simple_major, minor);
 
-	cdev_init(dev, fops);
-	dev->owner = THIS_MODULE;
-	dev->ops = fops;
-	snprintf(my_device_string, sizeof(my_device_string), "my_device_%d",
-			my_device_no++);
+	cdev_init(cdev, fops);
+	cdev->owner = THIS_MODULE;
+	cdev->ops = fops;
 
-	if (device_create(cl, NULL, devno, NULL, my_device_string) == NULL) {
-		printk(KERN_ERR "Error creating simple%d", minor);
+	if (device_create(cl, NULL, devno, NULL, device_name) == NULL) {
+		printk(KERN_ERR "Error creating dev/%s\n", device_name);
 		ret = -DEVCREATEERR;
 		goto setup_out;
 	}
 
-	err = cdev_add(dev, devno, 1);
+	err = cdev_add(cdev, devno, 1);
 	if (err) {
-		printk(KERN_ERR "Error %d adding simple%d", err, minor);
+		printk(KERN_ERR "Error %d adding dev/%s\n", err, device_name);
 		ret = -DEVADDERR;
 		goto setup_out;
 	}
@@ -258,30 +269,26 @@ setup_out:
 	return ret;
 }
 
-
-static const struct file_operations simple_device_0_ops = {
+static const struct file_operations prod_ops = {
 	.owner   = THIS_MODULE,
-	.open    = simple_open_0,
-	.release = simple_release_0,
-	.read = my_read_0,
-	.write = scull_write,
+	.open    = prod_open,
+	.release = prod_release,
+	.read = prod_read,
+	.write = prod_write,
 };
 
-static const struct file_operations simple_device_1_ops = {
+static const struct file_operations cons_ops = {
 	.owner   = THIS_MODULE,
-	.open    = simple_open_1,
-	.release = simple_release_1,
-	.read = scull_read,
-	.write = my_write_1,
+	.open    = cons_open,
+	.release = cons_release,
+	.read = cons_read,
+	.write = cons_write,
 };
-
-#define MAX_SIMPLE_DEV 2
-
-static struct cdev SimpleDevs[MAX_SIMPLE_DEV];
 
 static int simple_init(void)
 {
 	int result = 0;
+	static dev_t dev_no;
 	printk(KERN_INFO "%s()\n", __func__);
 
 	scull_private_data = kmalloc(sizeof(struct scull_dev), GFP_KERNEL);
@@ -297,15 +304,15 @@ static int simple_init(void)
 	scull_private_data->data = NULL;
 
 	/* Figure out our device number. */
-	result = alloc_chrdev_region(&dev, 0, 2, "simple");
+	result = alloc_chrdev_region(&dev_no, 0, 2, "simple");
 	if (result < 0) {
 		printk(KERN_WARNING "simple: unable to get major %d\n",
 			simple_major);
 		result = -EPERM;
 		goto alloc_chedev_region_fail;
 	}
-	simple_major = MAJOR(dev);
-	simple_minor = MINOR(dev);
+	simple_major = MAJOR(dev_no);
+	simple_minor = MINOR(dev_no);
 	printk(KERN_INFO "%s() : Simple driver for 2 devices\n", __func__);
 	printk(KERN_INFO "Major=%d,Minor=%d\n", simple_major, simple_minor);
 	printk(KERN_INFO "MajoR=%d,Minor=%d\n", simple_major, (simple_minor+1));
@@ -317,7 +324,8 @@ static int simple_init(void)
 	}
 
 	/* Now set up two cdevs. */
-	result = simple_setup_cdev(SimpleDevs, 0, &simple_device_0_ops);
+	result = simple_setup_cdev(simple_cdev, 0, &prod_ops,
+			"prod");
 	if (result < 0) {
 		if (result == -DEVADDERR)
 			goto dev_add_err_0;
@@ -325,7 +333,8 @@ static int simple_init(void)
 			goto dev_create_err_0;
 	}
 
-	result = simple_setup_cdev(SimpleDevs + 1, 1, &simple_device_1_ops);
+	result = simple_setup_cdev(simple_cdev + 1, 1, &cons_ops,
+			"cons");
 	if (result < 0) {
 		if (result == -DEVADDERR)
 			goto dev_add_err_1;
@@ -335,10 +344,10 @@ static int simple_init(void)
 	goto init_success;
 
 dev_add_err_1:
-	cdev_del(SimpleDevs + 1);
+	cdev_del(simple_cdev + 1);
 dev_create_err_1:
 dev_add_err_0:
-	cdev_del(SimpleDevs);
+	cdev_del(simple_cdev);
 dev_create_err_0:
 class_create_fail:
 	unregister_chrdev_region(MKDEV(simple_major, simple_minor), 2);
@@ -350,11 +359,10 @@ init_success:
 	return result;
 }
 
-
 static void simple_cleanup(void)
 {
-	cdev_del(SimpleDevs);
-	cdev_del(SimpleDevs + 1);
+	cdev_del(simple_cdev);
+	cdev_del(simple_cdev + 1);
 	device_destroy(cl, MKDEV(simple_major, simple_minor));
 	device_destroy(cl, MKDEV(simple_major, (simple_minor + 1)));
 	class_destroy(cl);
