@@ -1,19 +1,4 @@
 /*
- * Simple - REALLY simple memory mapping demonstration.
- *
- * Copyright (C) 2001 Alessandro Rubini and Jonathan Corbet
- * Copyright (C) 2001 O'Reilly & Associates
- *
- * The source code in this file can be freely used, adapted,
- * and redistributed in source or binary form, so long as an
- * acknowledgment appears in derived source files.  The citation
- * should list that the code comes from the book "Linux Device
- * Drivers" by Alessandro Rubini and Jonathan Corbet, published
- * by O'Reilly & Associates.   No warranty is attached;
- * we cannot take responsibility for errors or fitness for use.
- *
- */
-/*
  * my_device_0, it takes data and stores
  * in a linked list
  * my_device_1, it takes data from linked
@@ -35,6 +20,7 @@
 #include <linux/cdev.h>
 #include <linux/uaccess.h>
 #include <linux/device.h>
+#include <linux/string.h>
 #include "simple.h"
 static struct class *cl;
 static int simple_major;
@@ -42,9 +28,7 @@ static int simple_minor;
 int my_device_no;
 char my_device_string[20];
 static dev_t dev;
-module_param(simple_major, int, 0);
-MODULE_AUTHOR("Jonathan Corbet");
-MODULE_LICENSE("Dual BSD/GPL");
+
 struct scull_dev *scull_private_data;
 
 int scull_trim(struct scull_dev *dev)
@@ -245,10 +229,12 @@ static ssize_t my_write_1(struct file *f, const char __user *buf, size_t len,
 /*
  * Set up the cdev structure for a device.
  */
-static void simple_setup_cdev(struct cdev *dev, int minor,
+static int simple_setup_cdev(struct cdev *dev, int minor,
 		const struct file_operations *fops)
 {
-	int err, devno = MKDEV(simple_major, minor);
+	int err;
+	int ret = 0;
+	int devno = MKDEV(simple_major, minor);
 
 	cdev_init(dev, fops);
 	dev->owner = THIS_MODULE;
@@ -257,17 +243,19 @@ static void simple_setup_cdev(struct cdev *dev, int minor,
 			my_device_no++);
 
 	if (device_create(cl, NULL, devno, NULL, my_device_string) == NULL) {
-		printk(KERN_NOTICE "Error adding simple%d", minor);
-		class_destroy(cl);
-		unregister_chrdev_region(MKDEV(simple_major, simple_minor), 2);
+		printk(KERN_ERR "Error creating simple%d", minor);
+		ret = -DEVCREATEERR;
+		goto setup_out;
 	}
 
 	err = cdev_add(dev, devno, 1);
 	if (err) {
-		printk(KERN_NOTICE "Error %d adding simple%d", err, minor);
-		class_destroy(cl);
-		unregister_chrdev_region(MKDEV(simple_major, simple_minor), 2);
+		printk(KERN_ERR "Error %d adding simple%d", err, minor);
+		ret = -DEVADDERR;
+		goto setup_out;
 	}
+setup_out:
+	return ret;
 }
 
 
@@ -293,15 +281,16 @@ static struct cdev SimpleDevs[MAX_SIMPLE_DEV];
 
 static int simple_init(void)
 {
-	int result;
-	printk(KERN_INFO "simple: INIT\n");
+	int result = 0;
+	printk(KERN_INFO "%s()\n", __func__);
 
 	scull_private_data = kmalloc(sizeof(struct scull_dev), GFP_KERNEL);
 	if (!scull_private_data) {
 		result = -ENOMEM;
 		printk(KERN_ERR "simple: unable to kmalloc PRIVATE DATA\n");
-		return result;
+		goto kmalloc_fail;
 	}
+	memset(scull_private_data, '\0', sizeof(struct scull_dev));
 	scull_private_data->quantum = SCULL_QUANTUM;
 	scull_private_data->qset = SCULL_QSET;
 	scull_private_data->size = 0;
@@ -309,12 +298,11 @@ static int simple_init(void)
 
 	/* Figure out our device number. */
 	result = alloc_chrdev_region(&dev, 0, 2, "simple");
-	simple_major = MAJOR(dev);
-	simple_minor = MINOR(dev);
 	if (result < 0) {
 		printk(KERN_WARNING "simple: unable to get major %d\n",
 			simple_major);
-		return result;
+		result = -EPERM;
+		goto alloc_chedev_region_fail;
 	}
 	simple_major = MAJOR(dev);
 	simple_minor = MINOR(dev);
@@ -324,14 +312,42 @@ static int simple_init(void)
 
 	cl = class_create(THIS_MODULE, "chardrv");
 	if (cl == NULL) {
-		unregister_chrdev_region(MKDEV(simple_major, simple_minor), 2);
-		return -EPERM;
+		result = -EPERM;
+		goto class_create_fail;
 	}
 
 	/* Now set up two cdevs. */
-	simple_setup_cdev(SimpleDevs, 0, &simple_device_0_ops);
-	simple_setup_cdev(SimpleDevs + 1, 1, &simple_device_1_ops);
-	return 0;
+	result = simple_setup_cdev(SimpleDevs, 0, &simple_device_0_ops);
+	if (result < 0) {
+		if (result == -DEVADDERR)
+			goto dev_add_err_0;
+		else
+			goto dev_create_err_0;
+	}
+
+	result = simple_setup_cdev(SimpleDevs + 1, 1, &simple_device_1_ops);
+	if (result < 0) {
+		if (result == -DEVADDERR)
+			goto dev_add_err_1;
+		else
+			goto dev_create_err_1;
+	}
+	goto init_success;
+
+dev_add_err_1:
+	cdev_del(SimpleDevs + 1);
+dev_create_err_1:
+dev_add_err_0:
+	cdev_del(SimpleDevs);
+dev_create_err_0:
+class_create_fail:
+	unregister_chrdev_region(MKDEV(simple_major, simple_minor), 2);
+alloc_chedev_region_fail:
+	kfree(scull_private_data);
+kmalloc_fail:
+	result  = -1;
+init_success:
+	return result;
 }
 
 
@@ -347,7 +363,7 @@ static void simple_cleanup(void)
 	printk(KERN_INFO "%s() : Driver cleanup complete\n", __func__);
 }
 
-
-
 module_init(simple_init);
 module_exit(simple_cleanup);
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("SUNIL SHAHU");

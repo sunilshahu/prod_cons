@@ -11,6 +11,8 @@
 #define SCULL_MAX_DATA    (SCULL_QUANTUM * SCULL_QSET * 32)
 #endif
 
+#define DEVCREATEERR	1001
+#define DEVADDERR	1002
 struct scull_qset {
 	void **data;
 	struct scull_qset *next;
