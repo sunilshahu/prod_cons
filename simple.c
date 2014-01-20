@@ -5,197 +5,111 @@
  * list and returns to user
  */
 
-#include <linux/module.h>
-#include <linux/moduleparam.h>
-#include <linux/init.h>
-#include <linux/kernel.h>   /* printk() */
-#include <linux/slab.h>   /* kmalloc() */
-#include <linux/fs.h>       /* everything... */
-#include <linux/errno.h>    /* error codes */
-#include <linux/types.h>    /* size_t */
-#include <linux/mm.h>
-#include <linux/kdev_t.h>
-#include <asm/page.h>
-#include <linux/cdev.h>
-#include <linux/uaccess.h>
-#include <linux/device.h>
-#include <linux/string.h>
 #include "simple.h"
+
+wait_queue_head_t prod_que, cons_que;
+struct semaphore prod_sem;
+struct semaphore cons_sem;
 
 static struct class *cl;
 static int simple_major;
 static int simple_minor;
-int my_device_no;
-struct scull_dev *scull_private_data;
 static struct cdev simple_cdev[MAX_SIMPLE_DEV];
 
-/*
- * scull_tream() frees memory allocated to dev->data
- */
-int scull_trim(struct scull_dev *dev)
-{
-	struct scull_qset *next, *dptr;
-	int qset = dev->qset;   /* "dev" is not-null */
-	int i, j;
-	j = 0;
-
-	printk(KERN_INFO "%s() : cleaning up BUFFER..\n", __func__);
-	for (dptr = dev->data; dptr; dptr = next) { /* all the list items */
-		if (dptr->data) {
-			for (i = 0; i < qset; i++)
-				kfree(dptr->data[i]);
-			printk(KERN_INFO "%s() : freed no of quantum = %d\n",
-					__func__, i);
-			kfree(dptr->data);
-			dptr->data = NULL;
-		}
-		next = dptr->next;
-		kfree(dptr);
-		j++;
-	}
-	printk(KERN_INFO "%s() : freed no of qset = %d\n", __func__, j);
-	dev->size = 0;
-	dev->data = NULL;
-	return 0;
-}
-
-/*
- * scull_follow() returns pointer of the scull_qset where data needs to be
- * written or to be read. during write if new quantum set is required, it
- * creates one and adds at the end of scull_qset linked list.
- */
-struct scull_qset *scull_follow(struct scull_dev *dev, int n)
-{
-	struct scull_qset *qs = dev->data;
-
-	/* Allocate first qset explicitly if need be */
-	if (!qs) {
-		qs = dev->data = kmalloc(sizeof(struct scull_qset), GFP_KERNEL);
-		if (qs == NULL)
-			return NULL;  /* Never mind */
-		memset(qs, 0, sizeof(struct scull_qset));
-	}
-
-	/* Then follow the list */
-	while (n--) {
-		if (!qs->next) {
-			qs->next = kmalloc(sizeof(struct scull_qset),\
-					GFP_KERNEL);
-			if (qs->next == NULL)
-				return NULL;  /* Never mind */
-			memset(qs->next, 0, sizeof(struct scull_qset));
-		}
-		qs = qs->next;
-		continue;
-	}
-	return qs;
-}
+DECLARE_KFIFO(fifo, char, FIFO_SIZE);/*Circular buffer using kfifo kernel API*/
 
 /*
  * Producer of data - prod_write() concates data into buffer written
  * into /dev/prod device. Buffer is limited to grow upto 32MB.
  */
+
 ssize_t prod_write(struct file *filp, const char __user *buf, size_t count,
 		loff_t *f_pos)
 {
-	struct scull_qset *dptr;
-	int quantum = scull_private_data->quantum;
-	int qset = scull_private_data->qset;
-	int itemsize = quantum * qset;
-	int item, s_pos, q_pos, rest;
-	ssize_t retval = -ENOMEM; /* value used in "goto out" statements */
-	unsigned long int max_data = SCULL_MAX_DATA;
-
-	if (scull_private_data->size >= max_data) {
-		printk(KERN_ERR "32 MB Data buffer full or data is too large.");
-		printk(KERN_ERR "Please read and clear.\n");
-		goto out;
+	int ret;
+	int copied;
+	pr_info("%s() : FIFO size = %d, count = %d\n", __func__,
+			(int)kfifo_len(&fifo), (int)count);
+	if (down_interruptible(&prod_sem))
+		return -ERESTARTSYS;
+	while ((int)kfifo_avail(&fifo) <= 0) { /* full */
+		up(&prod_sem);
+		if (filp->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+		pr_info("%s() : \"%s\" going to sleep\n", __func__,
+				current->comm);
+		if (wait_event_interruptible(prod_que,\
+					(((int)kfifo_avail(&fifo)) > 0))) {
+			pr_info("%s() wait_event_interruptible() : signal: "
+				"tell the fs layer to handle it\n", __func__);
+			return -ERESTARTSYS;
+			/* signal: inform the fs layer to handle it */
+		}
+		if (down_interruptible(&prod_sem))
+			return -ERESTARTSYS;
+		pr_info("%s() : \"%s\" waken from sleep\n", __func__,
+				current->comm);
 	}
-	/* find listitem, qset index and offset in the quantum */
-
-	item = (long)scull_private_data->size / itemsize;
-	rest = (long)scull_private_data->size % itemsize;
-	s_pos = rest / quantum; q_pos = rest % quantum;
-
-	/* follow the list up to the right position */
-	dptr = scull_follow(scull_private_data, item);
-	if (dptr == NULL)
-		goto out;
-	if (!dptr->data) {
-		dptr->data = kmalloc(qset * sizeof(char *), GFP_KERNEL);
-		if (!dptr->data)
-			goto out;
-		memset(dptr->data, 0, qset * sizeof(char *));
-	}
-	if (!dptr->data[s_pos]) {
-		/*goto perticular quantum and create if not present */
-		dptr->data[s_pos] = kmalloc(quantum, GFP_KERNEL);
-		if (!dptr->data[s_pos])
-			goto out;
-	}
-	/* write only up to the end of this quantum */
-	if (count > quantum - q_pos)
-		count = quantum - q_pos;
-	/* in qset(data)->quantum(s_pos)->byteposition(q_post) wrte data */
-	if (copy_from_user(dptr->data[s_pos]+q_pos, buf, count)) {
-		retval = -EFAULT;
-		goto out;
-	}
-	*f_pos += count;
-	scull_private_data->size += count;
-	retval = count;
-
-out:
-	printk(KERN_INFO "%s(): DATA WRITE = %d bytes, BUFFER SIZE = %ld\n",
-			__func__, (int)retval, scull_private_data->size);
-	return retval;
+	count = min((int)count, (int)kfifo_avail(&fifo));
+	pr_info("%s() : \"%s\" data to copy = %li bytes\n",
+		__func__, current->comm, (long)count);
+	ret = kfifo_from_user(&fifo, buf, count, &copied);
+	up(&prod_sem);
+	if (ret < 0)
+		return -EFAULT;
+	pr_info("%s() : \"%s\" copied %d bytes.FIFO new SIZE = %d\n", __func__,
+				current->comm, copied, (int)kfifo_len(&fifo));
+	pr_info("%s() : \"%s\" waking up consumer processes\n", __func__,
+				current->comm);
+	wake_up_interruptible(&cons_que);
+	return ret ? ret : copied;
 }
 
 /*
  * Consumer of data - cons_read() reads data from kernel buffer and copies to
  * userspace buffer. It clears the kernel buffer after copying complete buffer.
  */
+
 ssize_t cons_read(struct file *filp, char __user *buf, size_t count,
 		loff_t *f_pos)
 {
-	struct scull_qset *dptr;	/* the first listitem */
-	int quantum = scull_private_data->quantum;
-	int qset = scull_private_data->qset;
-	int itemsize = quantum * qset; /* how many bytes in the listitem */
-	int item, s_pos, q_pos, rest;
-	ssize_t retval = 0;
+	int ret;
+	int copied;
+	pr_info("%s() : FIFO size = %d, count = %d\n", __func__,
+			(int)kfifo_len(&fifo), (int)count);
+	if (down_interruptible(&cons_sem))
+		return -ERESTARTSYS;
 
-	if (*f_pos >= scull_private_data->size) {
-		scull_trim(scull_private_data);
-		goto out;
+	while (kfifo_len(&fifo) <= 0) { /* nothing to read */
+		up(&cons_sem); /* release the lock */
+		if (filp->f_flags & O_NONBLOCK)
+			return -EAGAIN;
+		pr_info("%s () : \"%s\" going to sleep\n", __func__,
+				current->comm);
+		if (wait_event_interruptible(cons_que, kfifo_len(&fifo) > 0)) {
+			pr_info("%s() wait_event_interruptible() : signal: "
+				"tell the fs layer to handle it\n", __func__);
+			return -ERESTARTSYS;
+			/* signal: inform the fs layer to handle it */
+		}
+		if (down_interruptible(&cons_sem))
+			return -ERESTARTSYS;
 	}
-	if (*f_pos + count > scull_private_data->size)
-		count = scull_private_data->size - *f_pos;
+	/* ok, data is there, return something */
+	count = min((long)count, (long)kfifo_len(&fifo));
+	pr_info("%s() : \"%s\" data to copy = %li bytes\n",
+		__func__, current->comm, (long)count);
+	ret = kfifo_to_user(&fifo, buf, count, &copied);
+	up(&cons_sem);
+	if (ret < 0)
+		return -EFAULT;
+	pr_info("%s() : \"%s\" read %li bytes. FIFO new Size = %d\n",
+		__func__, current->comm, (long)count, (int)kfifo_len(&fifo));
+	pr_info("%s() : \"%s\" waking up producer processes\n", __func__,
+				current->comm);
+	wake_up_interruptible(&prod_que);
+	return copied;
 
-	/* find listitem,qset index,and offset in the quantum*/
-	item = (long)*f_pos / itemsize;
-	rest = (long)*f_pos % itemsize;
-	s_pos = rest / quantum; q_pos = rest % quantum;
-
-	/* follow the list up to the right position (defined elsewhere) */
-	dptr = scull_follow(scull_private_data, item);
-
-	if (dptr == NULL || !dptr->data || !dptr->data[s_pos])
-		goto out; /* don't fill holes */
-
-	/* read only up to the end of this quantum */
-	if (count > quantum - q_pos)
-		count = quantum - q_pos;
-
-	if (copy_to_user(buf, dptr->data[s_pos] + q_pos, count)) {
-		retval = -EFAULT;
-		goto out;
-	}
-	*f_pos += count;
-	retval = count;
-
-out:
-	return retval;
 }
 
 static int prod_open(struct inode *inode, struct file *filp)
@@ -213,7 +127,7 @@ static int prod_release(struct inode *inode, struct file *filp)
 static ssize_t prod_read(struct file *f, char __user *buf, size_t len,
 			loff_t *off)
 {
-	printk(KERN_INFO "%s() Read at exit end of pipe at /dev/my_device_1\n",
+	printk(KERN_INFO "%s() Read at exit end of pipe at /dev/cons\n",
 			__func__);
 	return 0;
 }
@@ -234,7 +148,7 @@ static int cons_release(struct inode *inode, struct file *filp)
 static ssize_t cons_write(struct file *f, const char __user *buf, size_t len,
 				loff_t *off)
 {
-	char *t = "/dev/my_device_0";
+	char *t = "/dev/prod";
 	printk(KERN_INFO "%s write at pipe entry point at %s\n", __func__, t);
 	return len;
 }
@@ -290,20 +204,6 @@ static int simple_init(void)
 	int result = 0;
 	static dev_t dev_no;
 	printk(KERN_INFO "%s()\n", __func__);
-
-	scull_private_data = kmalloc(sizeof(struct scull_dev), GFP_KERNEL);
-	if (!scull_private_data) {
-		result = -ENOMEM;
-		printk(KERN_ERR "simple: unable to kmalloc PRIVATE DATA\n");
-		goto kmalloc_fail;
-	}
-	memset(scull_private_data, '\0', sizeof(struct scull_dev));
-	scull_private_data->quantum = SCULL_QUANTUM;
-	scull_private_data->qset = SCULL_QSET;
-	scull_private_data->size = 0;
-	scull_private_data->data = NULL;
-
-	/* Figure out our device number. */
 	result = alloc_chrdev_region(&dev_no, 0, 2, "simple");
 	if (result < 0) {
 		printk(KERN_WARNING "simple: unable to get major %d\n",
@@ -341,6 +241,14 @@ static int simple_init(void)
 		else
 			goto dev_create_err_1;
 	}
+	/*
+	 * memory for data
+	 */
+	INIT_KFIFO(fifo);
+	sema_init(&prod_sem, 1);
+	sema_init(&cons_sem, 1);
+	init_waitqueue_head(&prod_que);
+	init_waitqueue_head(&cons_que);
 	goto init_success;
 
 dev_add_err_1:
@@ -352,8 +260,6 @@ dev_create_err_0:
 class_create_fail:
 	unregister_chrdev_region(MKDEV(simple_major, simple_minor), 2);
 alloc_chedev_region_fail:
-	kfree(scull_private_data);
-kmalloc_fail:
 	result  = -1;
 init_success:
 	return result;
@@ -367,11 +273,10 @@ static void simple_cleanup(void)
 	device_destroy(cl, MKDEV(simple_major, (simple_minor + 1)));
 	class_destroy(cl);
 	unregister_chrdev_region(MKDEV(simple_major, simple_minor), 2);
-	scull_trim(scull_private_data);
 	printk(KERN_INFO "%s() : Driver cleanup complete\n", __func__);
 }
 
 module_init(simple_init);
 module_exit(simple_cleanup);
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("SUNIL SHAHU");
+MODULE_AUTHOR("SUNIL SHAHU & DEVARSH THAKKAR");

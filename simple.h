@@ -1,30 +1,29 @@
-#ifndef SCULL_QUANTUM
-#define SCULL_QUANTUM 1024  /* one quantum 1 kb of size */
-#endif
-
-#ifndef SCULL_QSET
-#define SCULL_QSET    1024 /* one quantum set is 1024kb = 1 mb of size*/
-#endif
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/init.h>
+#include <linux/kernel.h>   /* printk() */
+#include <linux/slab.h>   /* kmalloc() */
+#include <linux/fs.h>       /* everything... */
+#include <linux/errno.h>    /* error codes */
+#include <linux/types.h>    /* size_t */
+#include <linux/mm.h>
+#include <linux/kdev_t.h>
+#include <asm/page.h>
+#include <linux/cdev.h>
+#include <linux/uaccess.h>
+#include <linux/device.h>
+#include <linux/string.h>
+#include <linux/kfifo.h>
+#include <linux/semaphore.h>
+#include <linux/mutex.h>
+#include <linux/wait.h>
+#include  <linux/sched.h>
 
 #define MAX_SIMPLE_DEV 2
-
-/*size of max allowed data  = 32 MB */
-#ifndef SCULL_MAX_DATA
-#define SCULL_MAX_DATA    (SCULL_QUANTUM * SCULL_QSET * 32)
-#endif
 
 #define DEVCREATEERR	1001
 #define DEVADDERR	1002
 
-struct scull_qset {
-	void **data;
-	struct scull_qset *next;
-};
-
-struct scull_dev {
-	struct scull_qset *data;  /* Pointer to first quantum set */
-	int quantum;              /* the current quantum size */
-	int qset;                 /* the current array size */
-	unsigned long size;       /* amount of data stored here */
-	unsigned int access_key;  /* used by sculluid and scullpriv */
-};
+#define KB		1024
+#define MB		(1024*KB)
+#define FIFO_SIZE	(32*MB)
