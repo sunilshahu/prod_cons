@@ -1,1 +1,8 @@
-Hello sunil ready to host our first project on git??
+PRODUCER - CONSUMER
+
+This project implements solution for producer-consumer problem.
+One device will put data in (prod) and another will take it out(cons).
+A buffer will hold the data between two actions.
+The aim is to practically apply theories learned from LDD3 book.
+So, after learning each new concepet, the same will be implemented to improve
+the solution.
