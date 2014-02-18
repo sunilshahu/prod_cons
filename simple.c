@@ -16,7 +16,7 @@ static int simple_major;
 static int simple_minor;
 static struct cdev simple_cdev[MAX_SIMPLE_DEV];
 
-DECLARE_KFIFO(fifo, char, FIFO_SIZE);/*Circular buffer using kfifo kernel API*/
+struct kfifo fifo;
 
 /*
  * Producer of data - prod_write() concates data into buffer written
@@ -204,6 +204,13 @@ static int simple_init(void)
 	int result = 0;
 	static dev_t dev_no;
 	printk(KERN_INFO "%s()\n", __func__);
+
+	result = kfifo_alloc(&fifo, FIFO_SIZE, GFP_KERNEL);
+	if (result) {
+		printk(KERN_ERR "error kfifo_alloc\n");
+		goto kfifo_alloc_err;
+	}
+
 	result = alloc_chrdev_region(&dev_no, 0, 2, "simple");
 	if (result < 0) {
 		printk(KERN_WARNING "simple: unable to get major %d\n",
@@ -241,16 +248,12 @@ static int simple_init(void)
 		else
 			goto dev_create_err_1;
 	}
-	/*
-	 * memory for data
-	 */
-	INIT_KFIFO(fifo);
+
 	sema_init(&prod_sem, 1);
 	sema_init(&cons_sem, 1);
 	init_waitqueue_head(&prod_que);
 	init_waitqueue_head(&cons_que);
 	goto init_success;
-
 dev_add_err_1:
 	cdev_del(simple_cdev + 1);
 dev_create_err_1:
@@ -260,6 +263,7 @@ dev_create_err_0:
 class_create_fail:
 	unregister_chrdev_region(MKDEV(simple_major, simple_minor), 2);
 alloc_chedev_region_fail:
+kfifo_alloc_err:
 	result  = -1;
 init_success:
 	return result;
@@ -267,6 +271,7 @@ init_success:
 
 static void simple_cleanup(void)
 {
+	kfifo_free(&fifo);
 	cdev_del(simple_cdev);
 	cdev_del(simple_cdev + 1);
 	device_destroy(cl, MKDEV(simple_major, simple_minor));

@@ -26,4 +26,8 @@
 
 #define KB		1024
 #define MB		(1024*KB)
-#define FIFO_SIZE	(32*MB)
+
+/* TODO : Unable to allocate more than 4MB buffer with kfifo_alloc()
+ * Why?
+ */
+#define FIFO_SIZE	(4*MB)
