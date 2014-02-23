@@ -27,7 +27,7 @@
 #define KB		1024
 #define MB		(1024*KB)
 
-/* TODO : Unable to allocate more than 4MB buffer with kfifo_alloc()
+/* FIXME : Unable to allocate more than 4MB buffer with kfifo_alloc()
  * Why?
  */
-#define FIFO_SIZE	(4*MB)
+unsigned long int FIFO_SIZE = (4*MB);

@@ -17,6 +17,7 @@ static int simple_minor;
 static struct cdev simple_cdev[MAX_SIMPLE_DEV];
 
 struct kfifo fifo;
+module_param(FIFO_SIZE, ulong, 0764);
 
 /*
  * Producer of data - prod_write() concates data into buffer written
@@ -210,6 +211,7 @@ static int simple_init(void)
 		printk(KERN_ERR "error kfifo_alloc\n");
 		goto kfifo_alloc_err;
 	}
+	printk(KERN_INFO "%s() : kfifo size = %lu\n", __func__, FIFO_SIZE);
 
 	result = alloc_chrdev_region(&dev_no, 0, 2, "simple");
 	if (result < 0) {
